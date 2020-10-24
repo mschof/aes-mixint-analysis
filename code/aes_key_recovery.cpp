@@ -12,6 +12,9 @@
 
 typedef unsigned char uchar;
 typedef unsigned long uint32;
+typedef unsigned long long uint64;
+
+#define g(x, y, z, w) ((uint32)(x) | ((uint32)(y) << 8) | ((uint32)(z) << 16) | ((uint32)(w) << 24))
 
 // S-box
 const uchar s_box[256] = {
@@ -278,6 +281,14 @@ void aes_round_instruction(uchar* state, uchar* key) {
   *state_ptr = _mm_aesenc_si128(*state_ptr, *key_ptr);
 }
 
+void aes_mix_columns_inverse_one_column_instruction(uchar* columns) {
+  uchar temp[16] = { 0 };
+  memcpy(temp, columns, 16 * sizeof(uchar));
+  __m128i* temp_ptr = (__m128i*)temp;
+  *temp_ptr = _mm_aesimc_si128(*temp_ptr);
+  memcpy(columns, temp, 16 * sizeof(uchar));
+}
+
 void aes_mix_columns_inverse_two_columns_instruction(uchar* columns) {
   uchar temp[16] = { 0 };
   memcpy(temp, columns, 8 * sizeof(uchar));
@@ -328,6 +339,8 @@ int aes_encryption(uchar* plaintext, uchar* ciphertext, uchar* key, uint32 num_r
 
   // Write ciphertext
   memcpy(ciphertext, state, 16 * sizeof(uchar));
+
+  return 0;
 }
 
 void key_recovery_3_rounds() {
@@ -421,7 +434,94 @@ void key_recovery_3_rounds() {
 
 // Remark: This attack requires too much time to test quickly on full AES!
 // -> Use small-scale version of AES ("Small Scale Variants of the AES")
-void key_recovery_4_rounds() {
+int mixture_integral_distinguisher_3_rounds(uint32 num_rounds) {
+  // Init key
+  uchar key[16];
+  RAND_bytes(key, 16);
+  //memset(key, 0x0, 16); // Test with zero key
+
+  uint32 num_aes_rounds = num_rounds;
+
+  // Init plaintexts
+  uint32 num_text_sets = 5;
+  uchar pt[num_text_sets][2][16];
+  memset(pt, 0x0, num_text_sets * 2 * 16 * sizeof(uchar));
+  uchar x_1 = 0xAB;
+  uchar x_2 = 0xCD;
+  uchar y_1 = 0x12;
+  uchar y_2 = 0x34;
+
+  uchar byte_active = 0x00;
+  for(uint32 i = 0; i < num_text_sets; i++) {
+    pt[i][0][0] = x_1;
+    pt[i][0][4] = y_1;
+    //pt[i][0][8] = byte_active;
+    RAND_bytes(&(pt[i][0][8]), 1);
+    pt[i][0][12] = 0;
+    pt[i][1][0] = x_2;
+    pt[i][1][4] = y_2;
+    //pt[i][1][8] = byte_active;
+    pt[i][1][8] = pt[i][0][8];
+    pt[i][2][12] = 0;
+    byte_active++;
+  }
+
+  // Get corresponding ciphertexts
+  uchar ct[num_text_sets][2][16];
+  memset(ct, 0x0, num_text_sets * 2 * 16 * sizeof(uchar));
+  for(uint32 i = 0; i < num_text_sets; i++) {
+    aes_encryption(pt[i][0], ct[i][0], key, num_aes_rounds);
+    aes_encryption(pt[i][1], ct[i][1], key, num_aes_rounds);
+  }
+
+  uint32 num_combs = 10;
+  uchar combs[num_combs][2];
+  combs[0][0] = 0;
+  combs[0][1] = 1;
+  combs[1][0] = 0;
+  combs[1][1] = 2;
+  combs[2][0] = 0;
+  combs[2][1] = 3;
+  combs[3][0] = 0;
+  combs[3][1] = 4;
+  combs[4][0] = 1;
+  combs[4][1] = 2;
+  combs[5][0] = 1;
+  combs[5][1] = 3;
+  combs[6][0] = 1;
+  combs[6][1] = 4;
+  combs[7][0] = 2;
+  combs[7][1] = 3;
+  combs[8][0] = 2;
+  combs[8][1] = 4;
+  combs[9][0] = 3;
+  combs[9][1] = 4;
+
+  for(uint32 comb = 0; comb < num_combs; comb++) {
+    for(uint32 i = 0; i < 4; i++) {
+      for(uint32 j = 0; j < 4; j++) {
+        uchar* a = ct[combs[comb][0]][0];
+        uchar* b = ct[combs[comb][0]][1];
+        uchar* c = ct[combs[comb][1]][0];
+        uchar* d = ct[combs[comb][1]][1];
+        if(((a[i*4+j] ^ b[i*4+j]) == 0 && (c[i*4+j] ^ d[i*4+j]) != 0) ||
+          ((a[i*4+j] ^ c[i*4+j]) == 0 && (b[i*4+j] ^ d[i*4+j]) != 0) ||
+          ((a[i*4+j] ^ d[i*4+j]) == 0 && (b[i*4+j] ^ c[i*4+j]) != 0) ||
+          ((b[i*4+j] ^ c[i*4+j]) == 0 && (a[i*4+j] ^ d[i*4+j]) != 0) ||
+          ((b[i*4+j] ^ d[i*4+j]) == 0 && (a[i*4+j] ^ c[i*4+j]) != 0) ||
+          ((c[i*4+j] ^ d[i*4+j]) == 0 && (a[i*4+j] ^ b[i*4+j]) != 0)) {
+          //std::cout << "Random permutation" << std::endl;
+          return 0;
+        }
+      }
+    }
+  }
+
+  //std::cout << "3-round AES" << std::endl;
+  return 1;
+}
+
+void key_recovery_4_rounds_algorithm_5() {
   // Init key
   uchar key[16];
   RAND_bytes(key, 16);
@@ -604,8 +704,18 @@ int main(int argc, char** argv) {
   std::cout << "Testing 3-round key recovery..." << std::endl;
   key_recovery_3_rounds();
 
+  std::cout << "Testing 3-round mixture integral distinguisher..." << std::endl;
+  uint32 counter_true = 0;
+  uint32 tests_triple = 100000;
+  for(uint32 i = 0; i < tests_triple; i++) {
+    counter_true += (1 == mixture_integral_distinguisher_3_rounds(3));
+    counter_true += (0 == mixture_integral_distinguisher_3_rounds(21));
+    counter_true += (0 == mixture_integral_distinguisher_3_rounds(21));
+  }
+  std::cout << "Detection rate (expected 0.95): " << float(counter_true / (3.0*tests_triple)) << std::endl;
+
   std::cout << "Testing 4-round key recovery..." << std::endl;
-  key_recovery_4_rounds();
+  key_recovery_4_rounds_algorithm_5();
 
 
   std::cout << "Finished" << std::endl;
